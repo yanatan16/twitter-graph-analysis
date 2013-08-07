@@ -32,52 +32,45 @@ def grab(id, api_args, inq, outq):
 	try:
 		while True:
 			handle = inq.get()
-			while True:
+			try:
+				# For each handle use 3 requests. Each most of the time will only be called once
+				# and each is in its own bucket of rate limiting
+				user = api.UsersLookup(screen_name=handle)[0]
+				followers = api.GetFollowerIDs(screen_name=handle)
+				friends = api.GetFriendIDs(screen_name=handle)
+				print 'Grabbed followers for %s (%s)' % (handle, id)
+				outq.put({
+					'handle': handle,
+					'user': {
+						'id': user.id,
+						'friends_count': user.friends_count,
+						'followers_count': user.followers_count,
+						'name': user.name,
+						'time_zone': user.time_zone,
+						'location': user.location,
+						'favourites_count': user.favourites_count,
+						'listed_count': user.listed_count,
+						'statuses_count': user.statuses_count
+					},
+					'followers': followers,
+					'friends': friends
+				})
+			except Exception as e:
 				try:
-					# For each handle use 3 requests. Each most of the time will only be called once
-					# and each is in its own bucket of rate limiting
-					user = api.UsersLookup(screen_name=handle)[0]
-					followers = api.GetFollowerIDs(screen_name=handle)
-					friends = api.GetFriendIDs(screen_name=handle)
-					print 'Grabbed followers for %s (%s)' % (handle, id)
-					outq.put({
-						'handle': handle,
-						'user': {
-							'id': user.id,
-							'friends_count': user.friends_count,
-							'followers_count': user.followers_count,
-							'name': user.name,
-							'time_zone': user.time_zone,
-							'location': user.location,
-							'favourites_count': user.favourites_count,
-							'listed_count': user.listed_count,
-							'statuses_count': user.statuses_count
-						},
-						'followers': followers,
-						'friends': friends
-					})
-					break
-				except Exception as e:
-					try:
-						if e.message[0][u'code'] == 88:
-							print 'Rate Limited: Sleeping for 15 minutes. Waking up at %s' % (datetime.now() + timedelta(seconds=sleep_time))
-							sleep(sleep_time)
-						elif e.message[0][u'code'] == 34:
-							print 'User %s does not exist.' % handle
-							outq.put({
-								'handle': handle,
-								'delete': True
-							})
-							break
-						else:
-							raise Exception('fake')
-					except:
-						try:
-							print 'Error: Grabber %s encountered exception. Prevented getting %s' % (id, handle), e
-						except:
-							pass
-						finally:
-							break
+					if e.message[0][u'code'] == 88:
+						print '%s Rate Limited: Sleeping for 15 minutes. Waking up at %s' % (id, datetime.now() + timedelta(seconds=sleep_time))
+						sleep(sleep_time)
+					elif e.message[0][u'code'] == 34:
+						print 'User %s does not exist.' % handle
+						put_delete(outq, handle)
+					elif e.message == 'Not authorized':
+						print 'User %s is protected.' % handle
+						put_delete(outq, handle)
+					else:
+						print 'Error: Grabber %s encountered exception. Prevented getting %s' % (id, handle), e
+				except:
+					pass
+
 			inq.task_done()
 
 	except Empty:
@@ -85,6 +78,7 @@ def grab(id, api_args, inq, outq):
 
 def get(mongo, q):
 	n = 0
+	print 'Getting handles from mongo'
 	for doc in mongo.rc.twitter.find({}, {'handle': 1, '_id': 0}):
 		n += 1
 		q.put(doc['handle'])
@@ -110,6 +104,12 @@ def save(mongo, q):
 	except Empty:
 		print 'Setter queue empty', e
 
+def put_delete(q, handle):
+	q.put({
+		'handle': handle,
+		'delete': True
+	})
+
 def main(apis):
 	inq = JoinableQueue()
 	outq = JoinableQueue()
@@ -124,4 +124,8 @@ def main(apis):
 
 # -- Main Code --
 if __name__ == '__main__':
+	# redirection hack
+	import sys
+	sys.stdout = open('followers.log', 'w')
+
 	main(apis)
